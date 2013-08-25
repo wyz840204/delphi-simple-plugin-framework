@@ -1,0 +1,60 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{1A195C08-C492-49E3-9652-7ADE20816E76}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="Demo\prjPlugIn.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="Source\prjPlugInManager\prjPlugInManager.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="Demo\prjPlugIn1.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="prjPlugIn">
+        <MSBuild Projects="Demo\prjPlugIn.dproj"/>
+    </Target>
+    <Target Name="prjPlugIn:Clean">
+        <MSBuild Projects="Demo\prjPlugIn.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="prjPlugIn:Make">
+        <MSBuild Projects="Demo\prjPlugIn.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="prjPlugInManager">
+        <MSBuild Projects="Source\prjPlugInManager\prjPlugInManager.dproj"/>
+    </Target>
+    <Target Name="prjPlugInManager:Clean">
+        <MSBuild Projects="Source\prjPlugInManager\prjPlugInManager.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="prjPlugInManager:Make">
+        <MSBuild Projects="Source\prjPlugInManager\prjPlugInManager.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="prjPlugIn1">
+        <MSBuild Projects="Demo\prjPlugIn1.dproj"/>
+    </Target>
+    <Target Name="prjPlugIn1:Clean">
+        <MSBuild Projects="Demo\prjPlugIn1.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="prjPlugIn1:Make">
+        <MSBuild Projects="Demo\prjPlugIn1.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="prjPlugIn;prjPlugInManager;prjPlugIn1"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="prjPlugIn:Clean;prjPlugInManager:Clean;prjPlugIn1:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="prjPlugIn:Make;prjPlugInManager:Make;prjPlugIn1:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>
