@@ -3,11 +3,11 @@ unit utPlugInObject;
 interface
 
   uses utPlugInInterface, System.Classes, System.Generics.Collections, SuperObject,
-    System.Rtti, DBXJSON, DBXJSONReflect;
+    System.Rtti, DBXJSON, DBXJSONReflect, SyncObjs;
 
   type
 
-    TIntObject = class(TObject, IInterface)
+    TInterfaceNoRefObject = class(TObject, IInterface)
       function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;
       function _AddRef: Integer; stdcall;
       function _Release: Integer; stdcall;
@@ -17,14 +17,25 @@ interface
     TPlugInClass = class of TPlugIn;
 
     // 插件工厂，每个工厂仅生产一种插件产品
-    TPlugInFactory = class(TIntObject, IPlugInFactory)
+    TPlugInFactory = class(TInterfaceNoRefObject, IPlugInFactory)
     protected
+      FLocker: TCriticalSection;
       FNamedList: TStringList; // 命名了的插件产品列表
       FUnNamedList: TList;     // 未命名的插件产品列表（不可持久性）
-    private
+    private type
+      TCreateNotify = class
+        Listener: IPlugIn;
+        PlugName: String;
+      end;
+
+    var
+      FCreateListener: TObjectList<TCreateNotify>;
+      procedure DoCreatedPlugIn(PlugName: String; const NewInt: IPlugIn);
     protected
       class function PlugInIID: TGUID; virtual;
       class function GetPlugInClass: TPlugInClass; virtual;
+      function DoCreatePlugIn(Name: String): TObject; virtual;
+      procedure DoDestroyPlugIn(Value: TObject); virtual;
       procedure ClearNamed;
     public
       constructor Create;
@@ -35,19 +46,21 @@ interface
 
       function CreatePlugIn(const PlugName: PWideChar; out Obj): Boolean; virtual;
       procedure DestroyPlugIn(var Obj); virtual;
+      function AddCreateNotify(const Listener: IPlugIn; const PlugName: PWideChar): IPlugIn;
 
       function ToString: PWideChar; virtual;           // 保存工厂内所有插件参数信息
       procedure FromString(Value: PWideChar); virtual; // 读取工厂内的插件信息,并生成插件
-      procedure GetPlugIn(const PlugName:PWideChar; var Obj);
+      procedure GetPlugIn(const PlugName: PWideChar; var Obj);
     end;
 
     // {$M+}
-    TPlugInParams = class(TIntObject, IInterface, IPlugInParams)
+    TPlugInParams = class(TInterfaceNoRefObject, IInterface, IPlugInParams)
     private
-      function BuildSO: ISuperObject;
+//      function BuildSO: ISuperObject;
     protected
+      FPlugIn: IPlugIn;
     public
-      constructor Create;
+      constructor Create(const PlugIn: IPlugIn); virtual;
       destructor Destroy; override;
       function ToString: PWideChar; virtual;                     // 参数保存为字符串
       function FromString(Value: PWideChar): PWideChar; virtual; // 设定参数，返回错误信息
@@ -55,29 +68,36 @@ interface
       function GetParamName(Index: Int32): PWideChar; virtual;
       function GetParamValue(Name: PWideChar): OleVariant; virtual;
       procedure SetParamValue(Name: PWideChar; Value: OleVariant); virtual;
-      function GetPlugInIID: TGUID;
+      function GetPlugIn: IPlugIn;
     end;
     // {$M-}
 
     TPlugInParamsClass = class of TPlugInParams;
 
-    TPlugIn = class(TIntObject, IPlugIn)
+    TPlugIn = class(TInterfaceNoRefObject, IPlugIn)
     protected
       FName: String;
+      FListener: TList<IPlugIn>;
       FFactory: TPlugInFactory;
       FParams: TPlugInParams;
       class function GetPlugInParamsClass: TPlugInParamsClass; virtual;
+      procedure BroadcastFree;
     public
       constructor Create(Factory: TPlugInFactory; Name: String); virtual;
       destructor Destroy; override;
+      procedure BeforeDestruction; override;
       function GetName: PWideChar;       // 读取插件实例名称
       function GetParams: IPlugInParams; // 读取插件参数接口
       function Start: Boolean; virtual;  // 运行插件
       procedure Stop; virtual;           // 停止插件
+      procedure AddNotifyListener(const Listener: IPlugIn);
+      procedure DelNotifyListener(const Listener: IPlugIn);
+      procedure Notify(const Notifier: IPlugIn; const aType: TPlugInNotifyType);
+      function GetPlugInIID: TGUID; virtual;
     end;
 
     // 每个提供插件的DLL,BPL包含一个TPlugInModule，管理多个工厂，即每个DLL,BPL可以有多个工厂，生产多种插件
-    TPlugInModule = class(TIntObject, IPlugInModule)
+    TPlugInModule = class(TInterfaceNoRefObject, IPlugInModule)
     protected
       FAuthor: String;
       FDate: TDateTime;
@@ -100,8 +120,8 @@ interface
       function ReleaseDate: TDateTime;
 
       function GetFactoryCount: Int32;
-      function GetFactory(Index: Int32):IPlugInFactory;
-      function GetFactoryByname(Name: PWideChar):IPlugInFactory;
+      function GetFactory(Index: Int32): IPlugInFactory;
+      function GetFactoryByname(Name: PWideChar): IPlugInFactory;
       class function GetInstance: TPlugInModule;
 
       procedure SetInfo(AuthorValue: String; ReleaseDateValue: TDateTime; VersionValue: String);
@@ -111,11 +131,11 @@ interface
 
 implementation
 
-  uses System.SysUtils, System.TypInfo, VCL.Dialogs;
+  uses System.SysUtils, System.TypInfo, VCL.Dialogs, utPlugInManagerDLL, System.Variants;
 
-  { TIntObject }
+  { TInterfaceNoRefObject }
 
-  function TIntObject.QueryInterface(const IID: TGUID; out Obj): HResult;
+  function TInterfaceNoRefObject.QueryInterface(const IID: TGUID; out Obj): HResult;
   begin
     if GetInterface(IID, Obj) then
       Result := 0
@@ -123,25 +143,51 @@ implementation
       Result := E_NOINTERFACE;
   end;
 
-  function TIntObject._AddRef: Integer;
+  function TInterfaceNoRefObject._AddRef: Integer;
   begin
     Result := -1;
   end;
 
-  function TIntObject._Release: Integer;
+  function TInterfaceNoRefObject._Release: Integer;
   begin
     Result := -1;
   end;
 
   { TPlugInFactory }
 
+  function TPlugInFactory.AddCreateNotify(const Listener: IPlugIn; const PlugName: PWideChar): IPlugIn;
+  var
+    N: TCreateNotify;
+  begin
+    Pointer(Result) := nil;
+    Self.GetPlugIn(PlugName, Result);
+    if Assigned(Result) then
+    begin
+      Result.AddNotifyListener(Listener);
+      Listener.Notify(Result, pntCreate);
+      Exit;
+    end;
+
+    if not Assigned(FCreateListener) then
+      FCreateListener := TObjectList<TCreateNotify>.Create(True);
+    N                 := TCreateNotify.Create;
+    N.Listener        := Listener;
+    N.PlugName        := PlugName;
+    FCreateListener.Add(N);
+  end;
+
   procedure TPlugInFactory.ClearNamed;
   var
-    i: Integer;
+    I: Integer;
   begin
-    for i := 0 to FNamedList.Count - 1 do
-      TPlugIn(FNamedList.Objects[i]).Free;
-    FNamedList.Clear;
+    FLocker.Enter;
+    try
+      for I := 0 to FNamedList.Count - 1 do
+        TPlugIn(FNamedList.Objects[I]).Free;
+      FNamedList.Clear;
+    finally
+      FLocker.Leave;
+    end;
   end;
 
   constructor TPlugInFactory.Create;
@@ -151,82 +197,131 @@ implementation
     FNamedList.Sorted     := True;
     FNamedList.Duplicates := dupError;
     FUnNamedList          := TList.Create;
+    FLocker               := TCriticalSection.Create;
   end;
 
   function TPlugInFactory.CreatePlugIn(const PlugName: PWideChar; out Obj): Boolean;
   var
-    NewObj: TPlugIn;
-    NewInt: IPlugIn;
+    NewObj: TObject;
   begin
-    if PlugName <> '' then
-    begin
-      if FNamedList.IndexOf(PlugName) > 0 then
-        raise Exception.Create(Format('插件"%s"已经存在，无法再创建！', [PlugName]));
-    end;
-    NewObj := GetPlugInClass.Create(Self, PlugName);
-    if NewObj.QueryInterface(PlugIn_IID, NewInt) = S_OK then
-    begin
+    Result:=False;
+    FLocker.Enter;
+    try
       if PlugName <> '' then
-        FNamedList.AddObject(PlugName, NewObj)
+      begin
+        if FNamedList.IndexOf(PlugName) > 0 then
+          raise Exception.Create(Format('插件"%s"已经存在，无法再创建！', [PlugName]));
+      end;
+      NewObj := DoCreatePlugIn(PlugName);
+      if NewObj.GetInterface(PlugIn_IID, Obj) then
+      begin
+        if PlugName <> '' then
+          FNamedList.AddObject(PlugName, NewObj)
+        else
+          FUnNamedList.Add(NewObj);
+          Result:=True;
+      end
       else
-        FUnNamedList.Add(NewObj);
-      IPlugIn(Obj) := NewInt;
-    end
-    else
-    begin
-      NewObj.Free;
-      raise Exception.Create(GetPlugInClass.ClassName + ' not support IPlugIn');
+      begin
+        NewObj.Free;
+        raise Exception.Create(GetPlugInClass.ClassName + ' not support IPlugIn');
+      end;
+    finally
+      FLocker.Leave;
     end;
-    Pointer(NewInt) := nil;
   end;
 
   destructor TPlugInFactory.Destroy;
   var
-    i: Integer;
+    I: Integer;
   begin
-    for i := 0 to FUnNamedList.Count - 1 do
-      TPlugIn(FUnNamedList[i]).Free;
-    FUnNamedList.Free;
+    FLocker.Enter;
+    try
+      for I := 0 to FUnNamedList.Count - 1 do
+        TPlugIn(FUnNamedList[I]).Free;
+      FUnNamedList.Free;
+    finally
+      FLocker.Leave;
+    end;
     ClearNamed;
+    FLocker.Free;
+    if Assigned(FCreateListener) then
+      FCreateListener.Free;
     inherited;
   end;
 
   procedure TPlugInFactory.DestroyPlugIn(var Obj);
   var
-    DelObj: TPlugIn;
+    DelObj: TObject;
     DelInt: IPlugIn;
-    i: Integer;
+    I: Integer;
     N: String;
   begin
     N := IPlugIn(Obj).GetName;
-    if (N <> '') then
-    begin
-      i := FNamedList.IndexOf(N);
-      if i >= 0 then
+    FLocker.Enter;
+    try
+      if (N <> '') then
       begin
-        DelObj := TPlugIn(FNamedList.Objects[i]);
-        FNamedList.Delete(i);
-        DelObj.Free;
-        Pointer(Obj) := nil;
-        Exit;
-      end;
-    end
-    else
-    begin
-      for i := 0 to FUnNamedList.Count - 1 do
+        I := FNamedList.IndexOf(N);
+        if I >= 0 then
+        begin
+          DelObj := TObject(FNamedList.Objects[I]);
+          FNamedList.Delete(I);
+          DoDestroyPlugIn(DelObj);
+          Pointer(Obj) := nil;
+          Exit;
+        end;
+      end
+      else
       begin
-        if TPlugIn(FUnNamedList[i]).QueryInterface(IPlugIn, DelInt) = S_OK then
-          if (DelInt = IPlugIn(Obj)) then
-          begin
-            DelObj := TPlugIn(FUnNamedList[i]);
-            FUnNamedList.Delete(i);
-            DelObj.Free;
-            Pointer(Obj) := nil;
-            Exit;
-          end;
+        for I := 0 to FUnNamedList.Count - 1 do
+        begin
+          if TPlugIn(FUnNamedList[I]).QueryInterface(IPlugIn, DelInt) = S_OK then
+            if (DelInt = IPlugIn(Obj)) then
+            begin
+              DelObj := TObject(FUnNamedList[I]);
+              FUnNamedList.Delete(I);
+              DoDestroyPlugIn(DelObj);
+              Pointer(Obj) := nil;
+              Exit;
+            end;
+        end;
       end;
+    finally
+      FLocker.Leave;
     end;
     raise Exception.Create(Format('当前工厂未产出插件"%s"', [N]));
+  end;
+
+  procedure TPlugInFactory.DoCreatedPlugIn(PlugName: String; const NewInt: IPlugIn);
+  var
+    I: Integer;
+  begin
+    if not Assigned(FCreateListener) then
+      Exit;
+    I := 0;
+    while I < FCreateListener.Count do
+    begin
+      if FCreateListener[I].PlugName = PlugName then
+      begin
+        NewInt.AddNotifyListener(FCreateListener[I].Listener);
+        FCreateListener[I].Listener.Notify(NewInt, pntCreate);
+        Pointer(FCreateListener[I].Listener) := nil;
+        FCreateListener.Delete(I);
+      end
+      else
+        Inc(I);
+    end;
+  end;
+
+  function TPlugInFactory.DoCreatePlugIn(Name: String): TObject;
+  begin
+    Result := GetPlugInClass.Create(Self, Name);
+  end;
+
+  procedure TPlugInFactory.DoDestroyPlugIn(Value: TObject);
+  begin
+    Value.Free;
   end;
 
   function TPlugInFactory.FactoryName: PWideChar;
@@ -237,7 +332,6 @@ implementation
   procedure TPlugInFactory.FromString(Value: PWideChar);
   var
     Jo, Item: ISuperObject;
-    i: Integer;
     It: IPlugIn;
   begin
     Jo := SO(Value);
@@ -248,21 +342,28 @@ implementation
     begin
       CreatePlugIn(PWideChar(Item.S['PlugInName']), It);
       It.GetParams.FromString(PWideChar(Item.S['Params']));
+      DoCreatedPlugIn(Item.S['PlugInName'], It);
+      Pointer(It):=nil;
     end;
   end;
 
-  procedure TPlugInFactory.GetPlugIn(const PlugName:PWideChar; var Obj);
+  procedure TPlugInFactory.GetPlugIn(const PlugName: PWideChar; var Obj);
   var
     N: Integer;
   begin
-    N := FNamedList.IndexOf(PlugName);
-    if N >= 0 then
-    begin
-      if TPlugIn(FNamedList.Objects[N]).QueryInterface(PlugIn_IID, Obj)<>S_OK then
-        Pointer(Obj):=nil;
-    end
-    else
-      Pointer(Obj) := nil;
+    FLocker.Enter;
+    try
+      N := FNamedList.IndexOf(PlugName);
+      if N >= 0 then
+      begin
+        if TPlugIn(FNamedList.Objects[N]).QueryInterface(PlugIn_IID, Obj) <> S_OK then
+          Pointer(Obj) := nil;
+      end
+      else
+        Pointer(Obj) := nil;
+    finally
+      FLocker.Leave;
+    end;
   end;
 
   class function TPlugInFactory.GetPlugInClass: TPlugInClass;
@@ -288,18 +389,23 @@ implementation
   function TPlugInFactory.ToString: PWideChar;
   var
     Jo, Ji, Ja: ISuperObject;
-    i: Integer;
+    I: Integer;
   begin
     Jo                := TSuperObject.Create(stObject);
     Ja                := TSuperObject.Create(stArray);
     Jo.S['Name']      := FactoryName;
     Jo.S['PlugInIID'] := UUIDToString(PlugInIID);
-    for i             := 0 to FNamedList.Count - 1 do
-    begin
-      Ji                 := TSuperObject.Create(stObject);
-      Ji.S['PlugInName'] := TPlugIn(FNamedList.Objects[i]).GetName;
-      Ji.O['Params']     := SO(TPlugIn(FNamedList.Objects[i]).GetParams.ToString);
-      Ja.AsArray.Add(Ji);
+    FLocker.Enter;
+    try
+      for I := 0 to FNamedList.Count - 1 do
+      begin
+        Ji                 := TSuperObject.Create(stObject);
+        Ji.S['PlugInName'] := TPlugIn(FNamedList.Objects[I]).GetName;
+        Ji.O['Params']     := SO(TPlugIn(FNamedList.Objects[I]).GetParams.ToString);
+        Ja.AsArray.Add(Ji);
+      end;
+    finally
+      FLocker.Leave;
     end;
     Jo.O['PlugIns'] := Ja;
     Result          := PWideChar(Jo.AsJSon);
@@ -307,16 +413,49 @@ implementation
 
   { TPlugIn }
 
+  procedure TPlugIn.AddNotifyListener(const Listener: IPlugIn);
+  begin
+    if not Assigned(FListener) then
+      FListener := TList<IPlugIn>.Create;
+
+    if FListener.IndexOf(Listener) < 0 then
+      FListener.Add(Listener);
+  end;
+
+  procedure TPlugIn.BeforeDestruction;
+  begin
+    inherited;
+    BroadcastFree;
+  end;
+
+  procedure TPlugIn.BroadcastFree;
+  var
+    I: Integer;
+  begin
+    if Assigned(FListener) then
+      for I := 0 to FListener.Count - 1 do
+        FListener[I].Notify(Self, pntDestroy);
+  end;
+
   constructor TPlugIn.Create(Factory: TPlugInFactory; Name: String);
   begin
     inherited Create;
     FFactory := Factory;
-    FParams  := GetPlugInParamsClass.Create;
+    FParams  := GetPlugInParamsClass.Create(Self);
     FName    := Name;
+
+  end;
+
+  procedure TPlugIn.DelNotifyListener(const Listener: IPlugIn);
+  begin
+    FListener.Remove(Listener);
+    if FListener.Count = 0 then
+      FreeAndNil(FListener);
   end;
 
   destructor TPlugIn.Destroy;
   begin
+    FListener.Free;
     FParams.Free;
     Pointer(FFactory) := nil;
     inherited;
@@ -337,9 +476,19 @@ implementation
     Result := TPlugInParams;
   end;
 
-  function TPlugIn.Start: Boolean;
+  procedure TPlugIn.Notify(const Notifier: IPlugIn; const aType: TPlugInNotifyType);
   begin
 
+  end;
+
+  function TPlugIn.GetPlugInIID: TGUID;
+  begin
+    Result := GUID_IPlugIn;
+  end;
+
+  function TPlugIn.Start: Boolean;
+  begin
+    Result:=False;
   end;
 
   procedure TPlugIn.Stop;
@@ -349,24 +498,26 @@ implementation
 
   { TPlugInParams }
 
-  function TPlugInParams.BuildSO: ISuperObject;
-  var
-    FValue: TValue;
-    FSrc: TSuperRttiContext;
-  begin
-    TValue.Make(@Self, PTypeInfo(Self.ClassInfo), FValue);
-    FSrc   := TSuperRttiContext.Create;
-    Result := FSrc.ToJson(FValue, SO);
-    FSrc.Free;
-  end;
+//  function TPlugInParams.BuildSO: ISuperObject;
+//  var
+//    FValue: TValue;
+//    FSrc: TSuperRttiContext;
+//  begin
+//    TValue.Make(@Self, PTypeInfo(Self.ClassInfo), FValue);
+//    FSrc   := TSuperRttiContext.Create;
+//    Result := FSrc.ToJson(FValue, SO);
+//    FSrc.Free;
+//  end;
 
-  constructor TPlugInParams.Create;
+  constructor TPlugInParams.Create(const PlugIn: IPlugIn);
   begin
     inherited Create;
+    FPlugIn := PlugIn;
   end;
 
   destructor TPlugInParams.Destroy;
   begin
+    Pointer(FPlugIn) := nil;
     inherited;
   end;
 
@@ -375,11 +526,12 @@ implementation
     FSo, Item: ISuperObject;
     ctx: TRttiContext;
     objType: TRttiType;
-    Field: TRttiField;
     Prop: TRttiProperty;
     aValue: TValue;
-    Data: String;
-    i: NativeInt;
+    G: TGUID;
+    P: IPlugIn;
+    F: IPlugInFactory;
+    I: NativeInt;
   begin
     ctx := TRttiContext.Create;
     FSo := SO(Value);
@@ -402,11 +554,27 @@ implementation
               aValue := TValue.FromOrdinal(aValue.TypeInfo, GetEnumValue(aValue.TypeInfo, Item.AsString));
             tkSet:
               begin
-                i := StringToSet(aValue.TypeInfo, Item.AsString);
-                TValue.Make(@i, aValue.TypeInfo, aValue);
+                I := StringToSet(aValue.TypeInfo, Item.AsString);
+                TValue.Make(@I, aValue.TypeInfo, aValue);
+              end;
+            tkUnknown, tkInterface:
+              begin
+                if StringToUUID(Item.S['IID'], G) then
+                begin
+                  F := PlugInModuleManager.GetFactory(G);
+                  if not Assigned(F) then
+                    raise Exception.Create(Format('属性%s未找到插件:"%s"的工厂', [Prop.Name, GUIDToString(G)]));
+                  if (Item.S['PlugInName'] = '') then
+                    raise Exception.Create(Format('属性%s包含空的插件名称，无法反序列化。', [Prop.Name]));
+                   P:=F.AddCreateNotify(GetPlugIn, PWideChar(Item.S['PlugInName']));
+                  TValue.Make(@P, aValue.TypeInfo, aValue);
+                end
+                else
+                  raise Exception.Create('属性%s保存错误的IID参数');
               end;
             else
-              raise Exception.Create('Type not Supported');
+              raise Exception.Create(Format('Property "%s" Type "%s" not Supported', [Prop.Name, GetEnumName(TypeInfo(System.TypInfo.TTypeKind),
+                      Ord(aValue.Kind))]));
           end;
           Prop.SetValue(Self, aValue);
         end;
@@ -441,7 +609,7 @@ implementation
   // var
   // FSo:ISuperObject;
   var
-    PropCount, i: SmallInt;
+    PropCount: SmallInt;
     PropList: PPropList;
   begin
     PropCount := GetTypeData(Self.ClassInfo).PropCount;
@@ -458,8 +626,8 @@ implementation
   end;
 
   function TPlugInParams.GetParamValue(Name: PWideChar): OleVariant;
-  var
-    FSo: ISuperObject;
+//  var
+//    FSo: ISuperObject;
   begin
     Result := System.TypInfo.GetPropValue(Self, Name);
     // FSo:=BuildSO;
@@ -473,18 +641,24 @@ implementation
     // end;
   end;
 
-  function TPlugInParams.GetPlugInIID: TGUID;
+  function TPlugInParams.GetPlugIn: IPlugIn;
   begin
-    Result := IPlugInParams;
+    Result := FPlugIn;
   end;
 
   procedure TPlugInParams.SetParamValue(Name: PWideChar; Value: OleVariant);
-  // var
-  // S, FSo:ISuperObject;
-  // FValue:TValue;
-  // FSrc:TSuperRttiContext;
+  var
+    // S, FSo:ISuperObject;
+    // FValue:TValue;
+    // FSrc:TSuperRttiContext;
+    I: PPropInfo;
   begin
-    System.TypInfo.SetPropValue(Self, Name, Value);
+    I := GetPropInfo(Self, Name, [tkInterface]);
+    if Assigned(I) then
+      System.TypInfo.SetInterfaceProp(Self, I, Value)
+    else
+      System.TypInfo.SetPropValue(Self, Name, Value);
+
     // FSo:=BuildSO;
     // ShowMessage(FSo.AsJSon(True, False));
     // S:=So(Value);
@@ -499,24 +673,23 @@ implementation
 
   function TPlugInParams.ToString: PWideChar;
   var
-    Item, Jo: ISuperObject;
+    Item, Jo, Ji: ISuperObject;
+    I: IPlugIn;
 
     ctx: TRttiContext;
     objType: TRttiType;
-    Field: TRttiField;
     Prop: TRttiProperty;
     Value: TValue;
-    Data: String;
   begin
     ctx := TRttiContext.Create;
-    Jo := TSuperObject.Create();
+    Jo  := TSuperObject.Create();
     try
       objType := ctx.GetType(Self.ClassInfo);
       for Prop in objType.GetProperties do
       begin
-        Value := Prop.GetValue(Self);
-        Item  := TSuperObject.Create();
-        Jo.O[Prop.Name]:=Item;
+        Value           := Prop.GetValue(Self);
+        Item            := TSuperObject.Create();
+        Jo.O[Prop.Name] := Item;
 
         case Value.Kind of
           tkWChar, tkLString, tkWString, tkString, tkChar, tkUString:
@@ -530,8 +703,21 @@ implementation
             Jo.S[Prop.Name] := Value.ToString;
           tkSet:
             Jo.S[Prop.Name] := Value.ToString;
-          else
-            raise Exception.Create('Type not Supported');
+          tkInterface:
+            begin
+              Value.ExtractRawData(@I);
+              if Assigned(I) then // 如果是插件接口，则保留IID和Name,便于反序列化时恢复
+              begin
+                Ji                 := TSuperObject.Create();
+                Ji.S['IID']        := UUIDToString(I.GetPlugInIID);
+                Ji.S['PlugInName'] := I.GetName;
+                Jo.O[Prop.Name]    := Ji;
+              end;
+              Pointer(I) := nil;
+            end
+          else // else of Case
+            raise Exception.Create(Format('Property "%s" Type "%s" not Supported', [Prop.Name, GetEnumName(TypeInfo(System.TypInfo.TTypeKind),
+                    Ord(Value.Kind))]));
         end;
       end;
     finally
@@ -542,7 +728,7 @@ implementation
     // Jo:ISuperObject;
     // begin
     // Jo:=BuildSO;
-     Result:=PWideChar(Jo.AsJSon);
+    Result := PWideChar(Jo.AsJSon);
   end;
 
   { TPlugInModule }
@@ -554,10 +740,10 @@ implementation
 
   procedure TPlugInModule.Clear;
   var
-    i: Integer;
+    I: Integer;
   begin
-    for i := 0 to FFactory.Count - 1 do
-      FFactory.Objects[i].Free;
+    for I := 0 to FFactory.Count - 1 do
+      FFactory.Objects[I].Free;
     FFactory.Clear;
   end;
 
@@ -573,6 +759,7 @@ implementation
   destructor TPlugInModule.Destroy;
   begin
     Clear;
+    FFactory.Free;
     FInstance := nil;
     inherited;
   end;
@@ -580,35 +767,35 @@ implementation
   procedure TPlugInModule.FromString(Value: PWideChar);
   var
     Jo, Ja, S: ISuperObject;
-    i: Integer;
+    I: Integer;
     G: TGUID;
   begin
     PlugInClear;
     Jo            := SO(Value);
     Self.FAuthor  := Jo.S['Author'];
-    Self.FDate    := JavaToDelphiDateTime(Jo.i['ReleaseDate']);
+    Self.FDate    := JavaToDelphiDateTime(Jo.I['ReleaseDate']);
     Self.FVersion := Jo.S['FVersion'];
     Ja            := Jo.O['Factories'];
     for S in Ja do
     begin
-      i := FFactory.IndexOf(S.S['Name']);
-      if StringToUUID(S.S['PlugInIID'], G) and (i >= 0) then
-        if TPlugInFactory(FFactory.Objects[i]).PlugIn_IID = G then
+      I := FFactory.IndexOf(S.S['Name']);
+      if StringToUUID(S.S['PlugInIID'], G) and (I >= 0) then
+        if TPlugInFactory(FFactory.Objects[I]).PlugIn_IID = G then
         begin
-          TPlugInFactory(FFactory.Objects[i]).FromString(PWideChar(S.AsJSon));
+          TPlugInFactory(FFactory.Objects[I]).FromString(PWideChar(S.AsJSon));
         end;
     end;
   end;
 
-  function TPlugInModule.GetFactory(Index: Int32):IPlugInFactory;
+  function TPlugInModule.GetFactory(Index: Int32): IPlugInFactory;
   var
     F: TPlugInFactory;
   begin
     F      := TPlugInFactory(FFactory.Objects[Index]);
-    Result:=F;
+    Result := F;
   end;
 
-  function TPlugInModule.GetFactoryByname(Name: PWideChar):IPlugInFactory;
+  function TPlugInModule.GetFactoryByname(Name: PWideChar): IPlugInFactory;
   var
     F: TPlugInFactory;
     N: Integer;
@@ -617,7 +804,7 @@ implementation
     if N >= 0 then
     begin
       F      := TPlugInFactory(FFactory.Objects[N]);
-      Result:= F;
+      Result := F;
     end
     else
       Result := nil;
@@ -637,10 +824,10 @@ implementation
 
   procedure TPlugInModule.PlugInClear;
   var
-    i: Integer;
+    I: Integer;
   begin
-    for i := 0 to FFactory.Count - 1 do
-      TPlugInFactory(FFactory.Objects[i]).ClearNamed;
+    for I := 0 to FFactory.Count - 1 do
+      TPlugInFactory(FFactory.Objects[I]).ClearNamed;
   end;
 
   procedure TPlugInModule.RegistPlugInFactory(Factory: TPlugInFactory);
@@ -665,16 +852,16 @@ implementation
   function TPlugInModule.ToString: PWideChar;
   var
     Jo, Ja, S: ISuperObject;
-    i: Integer;
+    I: Integer;
   begin
     Jo                  := TSuperObject.Create(stObject);
     Jo.S['Author']      := Self.FAuthor;
-    Jo.i['ReleaseDate'] := DelphiToJavaDateTime(Self.FDate);
+    Jo.I['ReleaseDate'] := DelphiToJavaDateTime(Self.FDate);
     Jo.S['FVersion']    := Self.FVersion;
     Ja                  := TSuperObject.Create(stArray);
-    for i               := 0 to Self.FFactory.Count - 1 do
+    for I               := 0 to Self.FFactory.Count - 1 do
     begin
-      S := SO(TPlugInFactory(Self.FFactory.Objects[i]).ToString);
+      S := SO(TPlugInFactory(Self.FFactory.Objects[I]).ToString);
       Ja.AsArray.Add(S);
     end;
     Jo.O['Factories'] := Ja;

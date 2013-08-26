@@ -20,6 +20,7 @@ type
     destructor Destroy;override;
     procedure ShowMessage;
     function Start:Boolean;override;   //ÔËÐÐ²å¼þ
+    function GetPlugInIID:TGUID;override;
   end;
 
   TDemoPlugInFactory1=class(TPlugInFactory)
@@ -51,6 +52,11 @@ begin
   inherited;
 end;
 
+function TDemoPlugIn1.GetPlugInIID: TGUID;
+begin
+  Result:=GUID_IDemoPlugIn1;
+end;
+
 class function TDemoPlugIn1.GetPlugInParamsClass: TPlugInParamsClass;
 begin
   Result:=TDemoPlugIn1Params;
@@ -64,6 +70,7 @@ end;
 function TDemoPlugIn1.Start: Boolean;
 begin
   ShowMessage;
+  Result:=True;
 end;
 
 { TDemoPlugInFactory1 }
