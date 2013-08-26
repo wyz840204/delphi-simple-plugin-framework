@@ -9,15 +9,16 @@ interface
     IID_IPlugInModule        = '{3C4BA31F-4B8E-4323-BC6D-96BE6D637E03}';
     IID_IPlugInModuleManager = '{85B3D232-5E64-4211-9B57-823E423BF799}';
 
-    GUID_IPlugInFactory       = IID_IPlugInFactory;
-    GUID_IPlugInParams        = IID_IPlugInParams;
-    GUID_IPlugIn              = IID_IPlugIn;
-    GUID_IPlugInModule        = IID_IPlugInModule;
-    GUID_IPlugInModuleManager = IID_IPlugInModuleManager;
+    GUID_IPlugInFactory:TGUID       = IID_IPlugInFactory;
+    GUID_IPlugInParams:TGUID        = IID_IPlugInParams;
+    GUID_IPlugIn:TGUID              = IID_IPlugIn;
+    GUID_IPlugInModule:TGUID        = IID_IPlugInModule;
+    GUID_IPlugInModuleManager:TGUID = IID_IPlugInModuleManager;
 
   type
 
     IPlugIn = interface;
+    PPlugIn = ^IPlugIn;
 
     // 插件工厂
     IPlugInFactory = interface
@@ -32,6 +33,7 @@ interface
       function ToString: PWideChar;           // 保存工厂内所有插件参数信息
       procedure FromString(Value: PWideChar); // 读取工厂内的插件信息,并生成插件
       procedure GetPlugIn(const PlugName: PWideChar; var Obj);
+      function AddCreateNotify(const Listener:IPlugIn; const PlugName:PWideChar):IPlugIn;
     end;
 
     // 插件的配置参数
@@ -43,8 +45,10 @@ interface
       function GetParamName(Index: Int32): PWideChar;
       function GetParamValue(Name: PWideChar): OleVariant;
       procedure SetParamValue(Name: PWideChar; Value: OleVariant);
-      function GetPlugInIID: TGUID;
+      function GetPlugIn:IPlugIn;
     end;
+
+    TPlugInNotifyType=(pntCreate, pntDestroy);
 
     // 插件接口
     IPlugIn = interface
@@ -53,6 +57,10 @@ interface
       function GetParams: IPlugInParams; // 读取插件参数接口
       function Start: Boolean;           // 运行插件
       procedure Stop;                    // 停止插件
+      procedure AddNotifyListener(const Listener:IPlugIn);
+      procedure DelNotifyListener(const Listener:IPlugIn);
+      procedure Notify(const Notifier:IPlugIn; const aType:TPlugInNotifyType);
+      function GetPlugInIID:TGUID;
     end;
 
     // 工厂模块，每个DLL中只有一个插件模块,

@@ -22,7 +22,7 @@ type
   IDemoPlugIn2=interface(IPlugIn)
     [IID_IDemoPlugIn2]
     procedure Calculate;
-    procedure SetShow(aShow:IDemoPlugIn1);
+    procedure DoShow;
   end;
 
 implementation

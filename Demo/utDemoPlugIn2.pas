@@ -4,39 +4,30 @@ interface
 
 uses utPlugInInterface, utPlugInObject, utDemoPluginInterface;
 
-const
-  IID_IDemoPlugIn2                    = '{33771DF2-18C9-4EFA-8D06-4DAB4FCBAD17}';
-  GUID_IDemoPlugIn2:TGUID             = IID_IDemoPlugIn2;
-
 type
-  IDemoPlugIn2=interface(IPlugIn)
-    [IID_IDemoPlugIn2]
-    procedure Calculate;
-    procedure SetShow(aShow:IDemoPlugIn1);
-  end;
 
   TDemoPlugIn2Params=class(TPlugInParams)
   protected
     FA:Double;
     FB:Double;
-    FC:TObject;
+    FShow:IDemoPlugIn1;
   published
     property A:Double read FA write FA;
     property B:Double read FB write FB;
-    property C:TObject read FC write FC;
+    property Show:IDemoPlugIn1 read FShow write FShow;
   end;
 
   TDemoPlugIn2=class(TPlugIn, IDemoPlugIn2)
   protected
-    FShow:IDemoPlugIn1;
     class function GetPlugInParamsClass:TPlugInParamsClass;override;
-    procedure SetShow(aShow:IDemoPlugIn1);
   public
     constructor Create(Factory:TPlugInFactory; Name:String);override;
     destructor Destroy;override;
     procedure Calculate;
+    procedure DoShow;
+
     function Start:Boolean;override;   //ÔËÐÐ²å¼þ
-    property Show:IDemoPlugIn1 read FShow write SetShow;
+    function GetPlugInIID:TGUID;override;
   end;
 
   TDemoPlugInFactory2=class(TPlugInFactory)
@@ -68,6 +59,20 @@ begin
   inherited;
 end;
 
+procedure TDemoPlugIn2.DoShow;
+begin
+  with TDemoPlugIn2Params(FParams) do
+  if Assigned(FShow) then
+  begin
+    FShow.ShowMessage;
+  end;
+end;
+
+function TDemoPlugIn2.GetPlugInIID: TGUID;
+begin
+  Result:=GUID_IDemoPlugIn2;
+end;
+
 class function TDemoPlugIn2.GetPlugInParamsClass: TPlugInParamsClass;
 begin
   Result:=TDemoPlugIn2Params;
@@ -75,21 +80,18 @@ end;
 
 procedure TDemoPlugIn2.Calculate;
 begin
+  with TDemoPlugIn2Params(FParams) do
   if Assigned(FShow) then
   begin
-    FShow.GetParams.SetParamValue('Message', Format('A*B=%f', [TDemoPlugIn2Params(FParams).A*TDemoPlugIn2Params(FParams).B]));
-    FShow.ShowMessage;
+    FShow.GetParams.SetParamValue('Message', Format('A=%f'#$0D#$0A'B=%f'#$0D#$0A'A*B=%f', [A, B, A*B]));
   end;
-end;
-
-procedure TDemoPlugIn2.SetShow(aShow: IDemoPlugIn1);
-begin
-  FShow:=aShow;
+  DoShow;
 end;
 
 function TDemoPlugIn2.Start: Boolean;
 begin
   Calculate;
+  Result:=True;
 end;
 
 { TDemoPlugInFactory2 }

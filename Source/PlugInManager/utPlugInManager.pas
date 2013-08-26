@@ -18,7 +18,7 @@ type
     class var FInstance:TPlugInModuleManager;
     class var FAppPath:String;
     FDLLs: TDictionary<string, TModule>;
-    FFactorys: TDictionary<TGUID, IPlugInFactory>;
+    FFactorys: TDictionary<TGUID, Pointer>;
     function QueryInterface(const IID: TGUID; out Obj): HResult; stdcall;
     function _AddRef: Integer; stdcall;
     function _Release: Integer; stdcall;
@@ -102,7 +102,7 @@ begin
 
   inherited Create;
   FDLLs:= TDictionary<string, TModule>.Create;
-  FFactorys:= TDictionary<TGUID, IPlugInFactory>.Create;
+  FFactorys:= TDictionary<TGUID, Pointer>.Create;
 end;
 
 destructor TPlugInModuleManager.Destroy;
@@ -116,14 +116,10 @@ end;
 procedure TPlugInModuleManager.FromString(Value: PWideChar);
 var
   S,Item:ISuperObject;
-  ja: TSuperArray;
-  I:Integer;
   M:IPlugInModule;
 begin
   UnLoadAll;
   S:=SO(Value);
-  I:= S.I['ModuleCount'];
-  ja:=S['Modules'].AsArray;
   for item in S['Modules'] do
   begin
     M:=LoadDLL(PWideChar(Item.S['FileName']));
@@ -133,7 +129,7 @@ end;
 
 function TPlugInModuleManager.GetFactory(PlugIn_IID: TGUID): IPlugInFactory;
 begin
-  if not FFactorys.TryGetValue(PlugIn_IID, Result) then Result:=nil;
+  if not FFactorys.TryGetValue(PlugIn_IID, Pointer(Result)) then Result:=nil;
 end;
 
 function TPlugInModuleManager.GetModule(FileName: PWidechar): IPlugInModule;
@@ -194,7 +190,7 @@ begin
   for i := 0 to Module.GetFactoryCount-1 do
   begin
     F:=Module.GetFactory(i);
-    if Assigned(F) then FFactorys.Add(F.PlugIn_IID, F);
+    if Assigned(F) then FFactorys.Add(F.PlugIn_IID, Pointer(F));
   end;
   Pointer(F):=nil;
   Result:=Module;
@@ -204,8 +200,6 @@ end;
 function TPlugInModuleManager.ToString: PWideChar;
 var
   S,A, Item:ISuperObject;
-  ja: TSuperArray;
-  I:Integer;
   Pair:TPair<String, TModule>;
 begin
   S:=TSuperObject.Create(stObject);
@@ -225,13 +219,21 @@ end;
 procedure TPlugInModuleManager.UnLoadAll;
 var
   Pair:TPair<String, TModule>;
+  M:TModule;
+  i:Integer;
 begin
+  for i := 0 to FFactorys.Keys.Count-1 do
+  begin
+    FFactorys.Items[FFactorys.Keys.ToArray[i]]:=nil;
+  end;
   FFactorys.Clear;
   for Pair in FDlls do
   begin
+    M:=Pair.Value;
+    Pointer(M.FModule):=nil;
+    M.Free;
+    FDlls.Items[Pair.Key]:=nil;
     FreeLibrary(Pair.Value.FLibHandle);
-    Pointer(Pair.Value.FModule):=nil;
-    Pair.Value.Free;
   end;
   FDlls.Clear;
 end;
@@ -272,5 +274,5 @@ end;
 initialization
   TPlugInModuleManager.GetInstance
 finalization
-  FreeAndNil(TPlugInModuleManager.FInstance);
+  if Assigned(TPlugInModuleManager.FInstance) then FreeAndNil(TPlugInModuleManager.FInstance);
 end.
